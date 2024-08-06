@@ -1,2 +1,5 @@
+dist/*
+config.json
+build_dev/*
 *bak
 jwt.txt
