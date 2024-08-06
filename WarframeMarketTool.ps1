@@ -1,5 +1,5 @@
 # Determine the path of the running executable or script
-$ExePath = [System.AppDomain]::CurrentDomain.BaseDirectory
+$ExePath = $PSScriptRoot #[System.AppDomain]::CurrentDomain.BaseDirectory
 
 # Construct paths to the XML files
 $MainXMLPath = Join-Path $ExePath 'Views\Main.xaml'
@@ -13,19 +13,20 @@ Add-Type -AssemblyName PresentationFramework
 [xml]$OMXML    = Get-Content $OMXMLPath
 
 # Load and parse the configuration file
-$config = Get-Content -Raw -Path $ConfigPath | ConvertFrom-Json
+#$config = Get-Content -Raw -Path $ConfigPath | ConvertFrom-Json
 
+<#
 if ([string]::IsNullOrWhiteSpace($config.email) -or [string]::IsNullOrWhiteSpace($config.password)) {
     [System.Windows.MessageBox]::Show("Please provide both email and password in the config file.", "Missing Information", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Warning)
     exit
 }
+#>
 
-$wmUri         = $config.wmUri
-$email         = $config.email
-$password      = $config.password
+$wmUri    = "https://api.warframe.market" # $config.wmUri #
+#$email    = $config.email
+#$password = $config.password
 
 $authorization = ""
-
 if(Test-Path $cookieJwtPath)
 {
     $cookieJwt = Get-Content $cookieJwtPath
@@ -38,30 +39,6 @@ if(Test-Path $cookieJwtPath)
         $authorization | Out-File $cookieJwtPath
     }
 }
-if($authorization -eq "")
-{
-    $loginResp = Invoke-WebRequest -Uri "$wmUri/v1/auth/signin" -Method Post -Headers @{
-        "content-type"  = "application/json; utf-8"
-        "accept"        = "application/json"
-	    "Authorization" = ""
-    } -Body (@{
-        "email"     = $email
-        "password"  = $password
-        "auth_type" = "header"
-    } | ConvertTo-Json) -ContentType "application/json"
-
-    if($loginResp.StatusCode -ne 200)
-    {
-        [System.Windows.MessageBox]::Show("Login status : Email /Password are incorrect.Please correct it in the config file.", "Login failed", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Warning)
-        exit "failed login $($loginResp.StatusCode) $($loginResp.StatusDescription)"
-    }
-
-    $authorization = $loginResp.Headers.Authorization
-    $authorization | Out-File $cookieJwtPath
-    $user          = ($loginResp.Content | ConvertFrom-Json).payload.user
-}
-
-$items = (Invoke-RestMethod -Uri "$wmUri/v1/items" -Method Get).payload.items
 
 
 function Update-Order( [string]$orderId, [Hashtable]$body, [string]$authorization )
@@ -73,9 +50,66 @@ function Update-Order( [string]$orderId, [Hashtable]$body, [string]$authorizatio
     } -Body ($body | ConvertTo-Json) -ContentType "application/json" | Out-Null
 }
 
+function Format-Info ($orderType, $name, $newPrice, $oldPrice, $bestPrice, $average)
+{
+    return "You $(switch($orderType) { "sell" {"WTS"} "buy" {"WTB"}}) $name for $newPrice PL (before $oldPrice) but someone sell it for $bestPrice PL - avg : $([Math]::Round($average, 2))"
+}
 
+$items = (Invoke-RestMethod -Uri "$wmUri/v1/items" -Method Get).payload.items
+
+
+### Begin Main UI
 $MainFormXML = (New-Object System.Xml.XmlNodeReader $MainXML)
 $Main = [Windows.Markup.XamlReader]::Load($MainFormXML)
+
+### Login Modal
+$LogInModal = $Main.FindName("LogInModal")
+$EmailTextBox = $Main.FindName("EmailTextBox")
+$PasswordBox = $Main.FindName("PasswordBox")
+$LogInButton = $Main.FindName("LogInButton")
+
+if($authorization -eq "")
+{
+    $LogInModal.Visibility = "Visible"
+}
+
+$LoginEvent = {
+    $loginResp = Invoke-WebRequest -Uri "$wmUri/v1/auth/signin" -Method Post -Headers @{
+        "content-type"  = "application/json; utf-8"
+        "accept"        = "application/json"
+	    "Authorization" = ""
+    } -Body (@{
+        "email"     = $EmailTextBox.Text
+        "password"  = $PasswordBox.Password
+        "auth_type" = "header"
+    } | ConvertTo-Json) -ContentType "application/json"
+
+    if($loginResp -ne $null -and $loginResp.StatusCode -eq 200)
+    {
+        $authorization = $loginResp.Headers.Authorization
+        $authorization | Out-File $cookieJwtPath
+        $user          = ($loginResp.Content | ConvertFrom-Json).payload.user
+        $LogInModal.Visibility = "Hidden"
+    }
+    else
+    {
+        [System.Windows.MessageBox]::Show("Email / Password are incorrect.", "Login failed", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Warning)
+        #exit "failed login $($loginResp.StatusCode) $($loginResp.StatusDescription)"
+    }
+}
+
+$LoginEnterPressed = {
+    Param ([object] $sender, [System.Windows.Input.KeyEventArgs] $e)
+    if ($e.Key -eq [System.Windows.Input.Key]::Enter)
+    {
+        Invoke-Command $LoginEvent
+    }
+}
+
+$EmailTextBox.Add_KeyDown($LoginEnterPressed)
+$PasswordBox.Add_KeyDown($LoginEnterPressed)
+$LogInButton.Add_Click($LoginEvent)
+
 
 $SearchTextBox = $Main.FindName("SearchTextBox")
 $SearchListBox = $Main.FindName("SearchListBox")
@@ -95,18 +129,41 @@ $SearchTextBox.Add_TextChanged({
 	            "Authorization" = $authorization
             }
             $url_name = $items | ? item_name -eq $SearchTextBox.Text | select -ExpandProperty url_name
-            $StatsDataGrid.ItemsSource = foreach($item_in_set in (Invoke-RestMethod -Uri "$wmUri/v1/items/$url_name" -Method Get).payload.item.items_in_set) { 
-                Start-Sleep -Milliseconds 250
-                $pieceStats = (Invoke-RestMethod -Uri "$wmUri/v1/items/$($item_in_set.url_name)/statistics" -Method Get).payload.statistics_closed."48hours"
-                [PSCustomObject]@{
-                    name = $item_in_set.en.item_name
-                    avg  = [math]::Round(($pieceStats | measure avg_price -Average).Average * $item_in_set.quantity_for_set)
-                    vol  = ($pieceStats | measure volume -Sum).Sum
-                    sell = ($profileOrders.payload.sell_orders | ? {$_.item.url_name -eq $item_in_set.url_name} | select -ExpandProperty platinum) -join '-'
-                    buy  = ($profileOrders.payload.buy_orders  | ? {$_.item.url_name -eq $item_in_set.url_name} | select -ExpandProperty platinum) -join '-'
-                }
+            $itemData = (Invoke-RestMethod -Uri "$wmUri/v1/items/$url_name" -Method Get).payload.item
+            if($itemData.mod_max_rank -ne $null)
+            {
+                $pieceStats = (Invoke-RestMethod -Uri "$wmUri/v1/items/$url_name/statistics" -Method Get).payload.statistics_closed."48hours"
+                $StatsDataGrid.ItemsSource = @(
+                    [PSCustomObject]@{
+                        name = "$($itemData.en.item_name) rank 0"
+                        avg  = [math]::Round(($pieceStats | ? mod_rank -eq 0 | measure median -Average).Average)
+                        vol  = ($pieceStats | ? mod_rank -eq 0 | measure volume -Sum).Sum
+                        sell = ($profileOrders.payload.sell_orders | ? {$_.item.url_name -eq $itemData.url_name} | ? mod_rank -eq 0 | select -ExpandProperty platinum) -join '-'
+                        buy  = ($profileOrders.payload.buy_orders  | ? {$_.item.url_name -eq $itemData.url_name} | ? mod_rank -eq 0 | select -ExpandProperty platinum) -join '-'
+                    },
+                    [PSCustomObject]@{
+                        name = "$($itemData.en.item_name) rank $($pieceStats.mod_max_rank)"
+                        avg  = [math]::Round(($pieceStats | ? mod_rank -eq $itemData.mod_max_rank | measure median -Average).Average)
+                        vol  = ($pieceStats | ? mod_rank -eq $itemData.mod_max_rank | measure volume -Sum).Sum
+                        sell = ($profileOrders.payload.sell_orders | ? {$_.item.url_name -eq $itemData.url_name} | ? mod_rank -eq $itemData.mod_max_rank | select -ExpandProperty platinum) -join '-'
+                        buy  = ($profileOrders.payload.buy_orders  | ? {$_.item.url_name -eq $itemData.url_name} | ? mod_rank -eq $itemData.mod_max_rank | select -ExpandProperty platinum) -join '-'
+                    }
+                )
             }
-            
+            else
+            {
+                $StatsDataGrid.ItemsSource = @(foreach($item_in_set in $itemData.items_in_set) { 
+                    Start-Sleep -Milliseconds 250
+                    $pieceStats = (Invoke-RestMethod -Uri "$wmUri/v1/items/$($item_in_set.url_name)/statistics" -Method Get).payload.statistics_closed."48hours"
+                    [PSCustomObject]@{
+                        name = $item_in_set.en.item_name
+                        avg  = [math]::Round(($pieceStats | measure median -Average).Average * [math]::Max(1, $item_in_set.quantity_for_set))
+                        vol  = ($pieceStats | measure volume -Sum).Sum
+                        sell = ($profileOrders.payload.sell_orders | ? {$_.item.url_name -eq $item_in_set.url_name} | select -ExpandProperty platinum) -join '-'
+                        buy  = ($profileOrders.payload.buy_orders  | ? {$_.item.url_name -eq $item_in_set.url_name} | select -ExpandProperty platinum) -join '-'
+                    }
+                })
+            }
         }
     }
     else
@@ -149,14 +206,15 @@ $StartButton.Add_Click({
             "visible"  = $order.visible
         }
 
-        $topUri   = "$wmUri/v2/orders/item/$($order.item.url_name)/top"
         $stats = (Invoke-RestMethod -Uri "$wmUri/v1/items/$($order.item.url_name)/statistics" -Method Get).payload.statistics_closed."48hours"
-        if($order.mod_rank)
+
+        $topUri = "$wmUri/v2/orders/item/$($order.item.url_name)/top"
+        if($order.mod_rank -ne $null)
         {
             $stats = $stats | ? mod_rank -eq $order.mod_rank
             if($order.mod_rank -eq $order.item.mod_max_rank)
             {
-                $topUri   += "/?maxRank=true"
+                $topUri += "/?maxRank=true"
             }
         }
 
@@ -164,20 +222,24 @@ $StartButton.Add_Click({
             "platform" = $order.platform
             "language" = $order.region
         }
-        
-        $bestSellOrder = $topOrders.data.sell | ? {$_.user.ingamename -ne $user.ingame_name} | select -First 1
-        $bestBuyOrder  = $topOrders.data.buy  | ? {$_.user.ingamename -ne $user.ingame_name} | select -First 1
-        
-        $sumVolume = ($stats | measure volume    -Sum    ).Sum
-        $avgPrice  = ($stats | measure avg_price -Average).Average            
-
         $minPercent = 0.05
         $maxPercent = 0.25
+        
+        $topSellOrders = $topOrders.data.sell | ? {$_.user.ingamename -ne $user.ingame_name}
+        $topBuyOrders  = $topOrders.data.buy  | ? {$_.user.ingamename -ne $user.ingame_name}
+
+        $sumVolume = ($stats | measure volume    -Sum ).Sum
+        $avgPrice  = ($stats | measure median -Average).Average   
+
+        $bestSellPrice = $topSellOrders.platinum -gt ($avgPrice * (1 + $minPercent)) | select -First 1
+        $bestBuyPrice  = $topBuyOrders.platinum  -lt ($avgPrice * (1 - $minPercent)) | select -First 1
+        
+        Write-Host "a. $($order.item.en.item_name) - $bestSellPrice - $newPrice - $($bestSellOrder.platinum) $([int]$avgPrice)"
         $info = switch($order.order_type)
         {
             "sell" {
-                $newPrice = $bestSellOrder.platinum - 1
-                if($newPrice -gt $avgPrice * (1 + $maxPercent)) {
+                $newPrice = $bestSellPrice - 1
+                if($bestSellPrice -eq $null -or $newPrice -gt $avgPrice * (1 + $maxPercent)) {
                     #"You WTS $($order.item.en.item_name) for $newPrice PL (before $($order.platinum)) but the average price is $([int]$avgPrice)"
                     $newPrice = [math]::Round($avgPrice * (1 + $maxPercent))
                 }
@@ -185,25 +247,26 @@ $StartButton.Add_Click({
                     #"You WTS $($order.item.en.item_name) for $newPrice PL (before $($order.platinum)) but the average price is $([int]$avgPrice)"
                     $newPrice = [math]::Round($avgPrice * (1 + $minPercent))
                 }
-                if($newPrice -le $bestBuyOrder.platinum) {
-                    "You WTS $($order.item.en.item_name) for $newPrice PL (before $($order.platinum)) but someone buy it for $($bestBuyOrder.platinum) PL"
+                if($newPrice -le ($topBuyOrders | select -ExpandProperty platinum -First 1)) {
+                    Format-Info -orderType $_ -name $order.item.en.item_name -newPrice $newPrice -oldPrice $order.platinum -bestPrice ($topBuyOrders | select -ExpandProperty platinum -First 1) -average $avgPrice
                 }
             }
             "buy" {
-                $newPrice = $bestBuyOrder.platinum + 1
-                if($newPrice -lt $avgPrice * (1 - $maxPercent)) {
+                $newPrice = $bestBuyPrice + 1
+                if($bestBuyPrice -eq $null -or $newPrice -lt $avgPrice * (1 - $maxPercent)) {
                     #"You WTB $($order.item.en.item_name) for $newPrice PL (before $($order.platinum)) but the average price is $([int]$avgPrice)"
                     $newPrice = [math]::Round($avgPrice * (1 - $maxPercent))
                 }
                 if($newPrice -gt $avgPrice * (1 - $minPercent)) {
-                    #"You WTB $($order.item.en.item_name) for $newPrice PL (before $($order.platinum)) but the average price is $([int]$avgPrice)"
+                    #"You WTS $($order.item.en.item_name) for $newPrice PL (before $($order.platinum)) but the average price is $([int]$avgPrice)"
                     $newPrice = [math]::Round($avgPrice * (1 - $minPercent))
                 }
-                if($newPrice -ge $bestSellOrder.platinum) {
-                    "You WTB $($order.item.en.item_name) for $newPrice PL (before $($order.platinum)) but someone sell it for $($bestSellOrder.platinum) PL"
+                if($newPrice -ge ($topSellOrders | select -ExpandProperty platinum -First 1)) {
+                    Format-Info -orderType $_ -name $order.item.en.item_name -newPrice $newPrice -oldPrice $order.platinum -bestPrice ($topSellOrders | select -ExpandProperty platinum -First 1) -average $avgPrice
                 }
             }
         }
+        Write-Host "b. $($order.item.en.item_name) - $bestSellPrice - $newPrice - $($bestSellOrder.platinum) $([int]$avgPrice)"
         if($info)
         {
             ### UI
@@ -304,19 +367,19 @@ $SetStatsButton.Add_Click({
                 $pieceStats = (Invoke-RestMethod -Uri "$wmUri/v1/items/$($_.url_name)/statistics" -Method Get).payload.statistics_closed."48hours"
                 [PSCustomObject]@{
                     name = $_.en.item_name
-                    avg  = ($pieceStats | measure avg_price -Average).Average * $_.quantity_for_set
+                    avg  = ($pieceStats | measure median -Average).Average * $_.quantity_for_set
                     sum  = ($pieceStats | measure volume    -Sum    ).Sum
                 }
             }
-            $set_avg_price  = [math]::Round(($setStats | measure avg_price -Average).Average)
+            $set_median  = [math]::Round(($setStats | measure median -Average).Average)
             $set_pieces_avg = [math]::Round(($piecesStats | measure avg   -Sum    ).sum)
             [PSCustomObject]@{
                 name              = $item.item_name
-                set_avg_price     = $set_avg_price
+                set_median        = $set_median
                 set_sum_volume    = ($setStats | measure volume -Sum).sum
                 set_pieces_avg    = $set_pieces_avg
                 set_pieces_volume = ($piecesStats | measure sum -Sum).sum
-                avg_benef         = $set_avg_price - $set_pieces_avg
+                avg_benef         = $set_median - $set_pieces_avg
             }
             Start-Sleep -Milliseconds 500
         }
