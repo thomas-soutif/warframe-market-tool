@@ -239,11 +239,11 @@ $StartButton.Add_Click({
         {
             "sell" {
                 $newPrice = $bestSellPrice - 1
-                if($bestSellPrice -eq $null -or $newPrice -gt $avgPrice * (1 + $maxPercent)) {
+                if($newPrice -gt $avgPrice * (1 + $maxPercent)) {
                     #"You WTS $($order.item.en.item_name) for $newPrice PL (before $($order.platinum)) but the average price is $([int]$avgPrice)"
                     $newPrice = [math]::Round($avgPrice * (1 + $maxPercent))
                 }
-                if($newPrice -lt $avgPrice * (1 + $minPercent)) {
+                if($bestSellPrice -eq $null -or $newPrice -lt $avgPrice * (1 + $minPercent)) {
                     #"You WTS $($order.item.en.item_name) for $newPrice PL (before $($order.platinum)) but the average price is $([int]$avgPrice)"
                     $newPrice = [math]::Round($avgPrice * (1 + $minPercent))
                 }
@@ -253,11 +253,11 @@ $StartButton.Add_Click({
             }
             "buy" {
                 $newPrice = $bestBuyPrice + 1
-                if($bestBuyPrice -eq $null -or $newPrice -lt $avgPrice * (1 - $maxPercent)) {
+                if($newPrice -lt $avgPrice * (1 - $maxPercent)) {
                     #"You WTB $($order.item.en.item_name) for $newPrice PL (before $($order.platinum)) but the average price is $([int]$avgPrice)"
                     $newPrice = [math]::Round($avgPrice * (1 - $maxPercent))
                 }
-                if($newPrice -gt $avgPrice * (1 - $minPercent)) {
+                if($bestBuyPrice -eq $null -or $newPrice -gt $avgPrice * (1 - $minPercent)) {
                     #"You WTS $($order.item.en.item_name) for $newPrice PL (before $($order.platinum)) but the average price is $([int]$avgPrice)"
                     $newPrice = [math]::Round($avgPrice * (1 - $minPercent))
                 }
